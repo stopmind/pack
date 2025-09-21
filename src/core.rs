@@ -13,7 +13,7 @@ pub struct Header {
 }
 
 #[repr(u8)]
-#[derive(TryFromBytes, IntoBytes, Immutable)]
+#[derive(TryFromBytes, IntoBytes, Immutable, Eq, PartialEq)]
 pub enum BlockType {
     Directory = 0xDD,
     File = 0xFF,
@@ -24,4 +24,11 @@ pub enum BlockType {
 pub struct BlockHeader {
     pub block_type: BlockType,
     pub size: U32,
+}
+
+#[repr(C)]
+#[derive(FromBytes, IntoBytes, Immutable)]
+pub struct DirectoryEntry {
+    pub offset: U32,
+    pub name_size: U16,
 }

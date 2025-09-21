@@ -1,12 +1,11 @@
 use crate::core::BlockType::{Directory, File};
-use crate::core::{BlockHeader, BlockType, Header, HEADER_MAGIC, SUPPORTED_VERSION};
+use crate::core::{BlockHeader, BlockType, DirectoryEntry, Header, HEADER_MAGIC, SUPPORTED_VERSION};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::SeekFrom::{Current, Start};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
-use zerocopy::big_endian::{U16, U32};
 use zerocopy::IntoBytes;
 
 struct Writer<T: Write + Seek> {
@@ -34,7 +33,7 @@ impl<T: Write + Seek> Writer<T> {
         Ok(offset)
     }
 
-    fn write_block_from_read(&mut self, block_type: BlockType, file: &mut impl Read) -> Result<u32> {
+    fn write_block_from_read(&mut self, block_type: BlockType, mut file: impl Read) -> Result<u32> {
         let offset = self.base.stream_position()?;
 
         let mut size = 0usize;
@@ -94,11 +93,11 @@ fn write_tree<T: Write + Seek>(writer: &mut Writer<T>, directory: impl AsRef<Pat
                 if entry.metadata()?.is_dir() {
                     unfinished_directory.sub_directories.push(entry.path());
                 } else {
-                    let mut file = OpenOptions::new()
+                    let file = OpenOptions::new()
                         .read(true)
                         .open(entry.path())?;
 
-                    let offset = writer.write_block_from_read(File, &mut file)?;
+                    let offset = writer.write_block_from_read(File, file)?;
 
                     unfinished_directory.map.insert(entry.path().file_name().unwrap().to_string_lossy().into_owned(), offset);
                 }
@@ -111,9 +110,13 @@ fn write_tree<T: Write + Seek>(writer: &mut Writer<T>, directory: impl AsRef<Pat
     fn end_directory<T: Write + Seek>(writer: &mut Writer<T>, directory: UnfinishedDirectory) -> Result<(String, u32)> {
         let mut buffer = Vec::<u8>::with_capacity(1024);
 
-        for (name, &offset) in &directory.map {
-            buffer.write(U32::from(offset).as_bytes())?;
-            buffer.write(U16::from(name.len() as u16).as_bytes())?;
+        for (name, offset) in directory.map {
+            let entry = DirectoryEntry {
+                offset: offset.into(),
+                name_size: (name.len() as u16).into(),
+            };
+
+            buffer.write(entry.as_bytes())?;
             buffer.write(name.as_bytes())?;
         }
 
