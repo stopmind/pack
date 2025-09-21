@@ -3,11 +3,47 @@ use crate::core::{BlockHeader, BlockType, DirectoryEntry, Header, HEADER_MAGIC, 
 use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 use std::fs::{create_dir, create_dir_all, remove_dir_all, OpenOptions};
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use zerocopy::{try_transmute, IntoBytes};
 
-fn read_block(mut read: impl Read + Seek, offset: u32) -> Result<(BlockType, Box<[u8]>)> {
+struct Frame<T: Read> {
+    read: T,
+    offset: usize,
+    end: usize,
+}
+
+impl<'a, T: Read> Frame<T> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let max_size = self.end - self.offset;
+
+        if max_size == 0 {
+            return Ok(0);
+        }
+
+        let size = if buf.len() > max_size {
+            self.read.read(&mut buf[..max_size])
+        } else {
+            self.read.read(buf)
+        }?;
+
+        self.offset += size;
+
+        Ok(size)
+    }
+
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        if self.offset + buf.len() > self.end {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof))
+        }
+
+        self.offset += buf.len();
+        self.read.read_exact(buf)
+    }
+}
+
+fn read_block<R: Read + Seek>(mut read: R, offset: u32) -> Result<(BlockType, Frame<R>)> {
     let mut header = [0u8; size_of::<BlockHeader>()];
 
     read.seek(SeekFrom::Start(offset as u64))?;
@@ -16,16 +52,17 @@ fn read_block(mut read: impl Read + Seek, offset: u32) -> Result<(BlockType, Box
     let header: BlockHeader = try_transmute!(header)
         .map_err(|e| anyhow!("Failed read block header: {:?}", e))?;
 
-    let mut content = vec![0u8; header.size.get() as usize]
-        .into_boxed_slice();
+    let offset = offset as usize + size_of::<BlockHeader>();
+    let frame = Frame {
+        read,
+        offset,
+        end: offset + header.size.get() as usize,
+    };
 
-    read.read_exact(content.as_mut())?;
-
-    Ok((header.block_type, content))
+    Ok((header.block_type, frame))
 }
 
-fn read_directory(data: impl AsRef<[u8]>) -> Result<HashMap<String, u32>> {
-    let mut cursor = Cursor::new(data.as_ref());
+fn read_directory(mut data: Frame<impl Read>) -> Result<HashMap<String, u32>> {
     let mut directory = HashMap::new();
 
     let mut entry = DirectoryEntry {
@@ -34,12 +71,12 @@ fn read_directory(data: impl AsRef<[u8]>) -> Result<HashMap<String, u32>> {
     };
 
     loop {
-        if let Err(_) = cursor.read_exact(entry.as_mut_bytes()) {
+        if let Err(_) = data.read_exact(entry.as_mut_bytes()) {
             break;
         }
 
         let mut string = vec![0u8; entry.name_size.get() as usize];
-        cursor.read_exact(string.as_mut_slice()).unwrap();
+        data.read_exact(string.as_mut_slice())?;
 
         directory.insert(String::from_utf8(string)?, entry.offset.into());
     }
@@ -48,6 +85,8 @@ fn read_directory(data: impl AsRef<[u8]>) -> Result<HashMap<String, u32>> {
 }
 
 fn unpack_tree(mut read: impl Read + Seek, root: u32, mut path: PathBuf) -> Result<()> {
+    let mut buffer = vec![0u8; 5 * 1024 * 1024];
+
     let (block_type, content) = read_block(&mut read, root)?;
 
     if block_type != Directory {
@@ -69,7 +108,7 @@ fn unpack_tree(mut read: impl Read + Seek, root: u32, mut path: PathBuf) -> Resu
         while let Some((name, offset)) = directory.pop() {
             path.push(name);
 
-            let (block_type, content) = read_block(&mut read, offset)?;
+            let (block_type, mut content) = read_block(&mut read, offset)?;
             match block_type {
                 Directory => {
                     create_dir(&path)?;
@@ -83,12 +122,20 @@ fn unpack_tree(mut read: impl Read + Seek, root: u32, mut path: PathBuf) -> Resu
                     continue 'dirs;
                 }
                 File => {
-                    OpenOptions::new()
+                    let mut file = OpenOptions::new()
                         .write(true)
                         .truncate(true)
                         .create(true)
-                        .open(&path)?
-                    .write_all(&content)?;
+                        .open(&path)?;
+
+                    loop {
+                        let chunk_size = content.read(buffer.as_mut_slice())?;
+                        if chunk_size == 0 {
+                            break;
+                        }
+
+                        file.write(&buffer[..chunk_size])?;
+                    }
 
                     path.pop();
                 }

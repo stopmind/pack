@@ -6,6 +6,6 @@ mod core;
 mod unpack;
 
 fn main() {
-    pack("out.pak", "./in").unwrap();
-    unpack("in.pak", "./out").unwrap();
+    pack("out.pak", "in").unwrap();
+    unpack("in.pak", "out").unwrap();
 }

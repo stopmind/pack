@@ -10,12 +10,16 @@ use zerocopy::IntoBytes;
 
 struct Writer<T: Write + Seek> {
     base: T,
+    buffer: Vec<u8>,
 }
 
 impl<T: Write + Seek> Writer<T> {
     fn new(mut base: T) -> Result<Self> {
         base.seek(Start(size_of::<Header>() as u64))?;
-        Ok(Self { base })
+        Ok(Self {
+            base,
+            buffer: vec![0; 5 * 1024 * 1024]
+        })
     }
 
     fn write_block(&mut self, block_type: BlockType, data: impl AsRef<[u8]>) -> Result<u32> {
@@ -37,17 +41,16 @@ impl<T: Write + Seek> Writer<T> {
         let offset = self.base.stream_position()?;
 
         let mut size = 0usize;
-        let mut buff = [0u8; 5 * 1024];
 
         self.base.seek(Current(size_of::<BlockHeader>() as i64))?;
         loop {
-            let chunk_size = file.read(&mut buff)?;
+            let chunk_size = file.read(self.buffer.as_mut_slice())?;
             if chunk_size == 0 {
                 break;
             }
 
             size += chunk_size;
-            self.base.write(&buff[..chunk_size])?;
+            self.base.write(&self.buffer[..chunk_size])?;
         }
 
         let header = BlockHeader {
